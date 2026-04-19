@@ -4,11 +4,12 @@ using Reactor.Utilities;
 using System;
 using System.Collections;
 using System.IO;
+using System.Linq;
+using System.Reflection;
 using System.Text;
 using TownOfUs.Assets;
 using TownOfUs.Utilities;
 using UnityEngine;
-using UnityEngine.Networking;
 
 namespace DraftModeTOUM
 {
@@ -117,18 +118,26 @@ namespace DraftModeTOUM
 
                 try
                 {
-                    yield return req.SendWebRequest();
-
-                    if (req.result != UnityWebRequest.Result.Success)
+                    var sendOp = TrySendAudioRequest(req, out var sendError);
+                    if (sendOp == null)
                     {
                         _customClipFailed = true;
                         DraftModePlugin.Logger?.LogWarning(
-                            $"[DraftAudio] Failed to load custom chime '{path}': {req.error}");
+                            $"[DraftAudio] Failed to load custom chime '{path}': {sendError ?? "request send failed"}");
                         yield break;
                     }
 
-                    var dh = req.downloadHandler as DownloadHandlerAudioClip;
-                    var clip = dh != null ? dh.audioClip : null;
+                    yield return sendOp;
+
+                    if (!DidAudioRequestSucceed(req, out var loadError))
+                    {
+                        _customClipFailed = true;
+                        DraftModePlugin.Logger?.LogWarning(
+                            $"[DraftAudio] Failed to load custom chime '{path}': {loadError}");
+                        yield break;
+                    }
+
+                    var clip = TryGetAudioClip(req);
                     _customClip = clip;
                     if (_customClip != null)
                     {
@@ -144,7 +153,7 @@ namespace DraftModeTOUM
                 }
                 finally
                 {
-                    req.Dispose();
+                    DisposeAudioRequest(req);
                 }
             }
             finally
@@ -153,18 +162,165 @@ namespace DraftModeTOUM
             }
         }
 
-        private static UnityWebRequest TryCreateAudioRequest(string uri, AudioType audioType, out string error)
+        private static object TryCreateAudioRequest(string uri, AudioType audioType, out string error)
         {
             error = null;
             try
             {
-                return UnityWebRequestMultimedia.GetAudioClip(uri, audioType);
+                var multimediaType = FindType("UnityEngine.Networking.UnityWebRequestMultimedia");
+                if (multimediaType == null)
+                {
+                    error = "UnityWebRequestMultimedia type not found";
+                    return null;
+                }
+
+                var getAudioClip = multimediaType.GetMethod(
+                    "GetAudioClip",
+                    BindingFlags.Public | BindingFlags.Static,
+                    null,
+                    new[] { typeof(string), typeof(AudioType) },
+                    null);
+
+                if (getAudioClip == null)
+                {
+                    error = "GetAudioClip overload not found";
+                    return null;
+                }
+
+                return getAudioClip.Invoke(null, new object[] { uri, audioType });
             }
             catch (Exception ex)
             {
                 error = ex.Message;
                 return null;
             }
+        }
+
+        private static object TrySendAudioRequest(object req, out string error)
+        {
+            error = null;
+            try
+            {
+                if (req == null)
+                {
+                    error = "request was null";
+                    return null;
+                }
+
+                var method = req.GetType().GetMethod("SendWebRequest", BindingFlags.Public | BindingFlags.Instance);
+                if (method == null)
+                {
+                    error = "SendWebRequest method not found";
+                    return null;
+                }
+
+                return method.Invoke(req, null);
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return null;
+            }
+        }
+
+        private static bool DidAudioRequestSucceed(object req, out string error)
+        {
+            error = TryGetRequestError(req) ?? "request failed";
+            if (req == null) return false;
+
+            try
+            {
+                var resultProp = req.GetType().GetProperty("result", BindingFlags.Public | BindingFlags.Instance);
+                if (resultProp != null)
+                {
+                    var result = resultProp.GetValue(req);
+                    bool success = string.Equals(result?.ToString(), "Success", StringComparison.OrdinalIgnoreCase);
+                    if (success) error = null;
+                    return success;
+                }
+
+                bool isNetworkError = GetBoolProperty(req, "isNetworkError");
+                bool isHttpError = GetBoolProperty(req, "isHttpError");
+                bool successFallback = !isNetworkError && !isHttpError;
+                if (successFallback) error = null;
+                return successFallback;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+        }
+
+        private static AudioClip TryGetAudioClip(object req)
+        {
+            try
+            {
+                if (req == null) return null;
+
+                var downloadHandler = req.GetType()
+                    .GetProperty("downloadHandler", BindingFlags.Public | BindingFlags.Instance)?
+                    .GetValue(req);
+                if (downloadHandler == null) return null;
+
+                return downloadHandler.GetType()
+                    .GetProperty("audioClip", BindingFlags.Public | BindingFlags.Instance)?
+                    .GetValue(downloadHandler) as AudioClip;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static void DisposeAudioRequest(object req)
+        {
+            try
+            {
+                if (req is IDisposable disposable)
+                {
+                    disposable.Dispose();
+                    return;
+                }
+
+                req?.GetType().GetMethod("Dispose", BindingFlags.Public | BindingFlags.Instance)?.Invoke(req, null);
+            }
+            catch
+            {
+            }
+        }
+
+        private static string TryGetRequestError(object req)
+        {
+            try
+            {
+                return req?.GetType().GetProperty("error", BindingFlags.Public | BindingFlags.Instance)?.GetValue(req) as string;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static bool GetBoolProperty(object target, string propertyName)
+        {
+            try
+            {
+                return target != null
+                    && target.GetType().GetProperty(propertyName, BindingFlags.Public | BindingFlags.Instance)?.GetValue(target) is bool value
+                    && value;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static Type FindType(string fullName)
+        {
+            return AppDomain.CurrentDomain.GetAssemblies()
+                .Select(assembly => assembly.GetType(fullName, false))
+                .FirstOrDefault(type => type != null);
         }
 
         private static bool TryLoadWavFromFile(string path, out AudioClip clip)
