@@ -53,18 +53,44 @@ public sealed class DraftModeOptions : AbstractOptionGroup
         Visible = () => OptionGroupSingleton<DraftModeOptions>.Instance.EnableDraft
     };
 
+    public ModdedToggleOption RespectTouMRoleListCaps { get; set; } = new("Respect ToU:M Role List Caps", false)
+    {
+        Visible = () => OptionGroupSingleton<DraftModeOptions>.Instance.EnableDraft
+    };
+
+    public ModdedNumberOption MinImpostors { get; set; } = new("Min Impostors", 0f, 0f, 5f, 1f, MiraNumberSuffixes.None, "0")
+    {
+        Visible = () => OptionGroupSingleton<DraftModeOptions>.Instance.EnableDraft
+            && !OptionGroupSingleton<DraftModeOptions>.Instance.RespectTouMRoleListCaps
+    };
+
+    public ModdedNumberOption MinNeutralKillings { get; set; } = new("Min Neutral Killings", 0f, 0f, 10f, 1f, MiraNumberSuffixes.None, "0")
+    {
+        Visible = () => OptionGroupSingleton<DraftModeOptions>.Instance.EnableDraft
+            && !OptionGroupSingleton<DraftModeOptions>.Instance.RespectTouMRoleListCaps
+    };
+
+    public ModdedNumberOption MinNeutralPassives { get; set; } = new("Min Neutral Other", 0f, 0f, 10f, 1f, MiraNumberSuffixes.None, "0")
+    {
+        Visible = () => OptionGroupSingleton<DraftModeOptions>.Instance.EnableDraft
+            && !OptionGroupSingleton<DraftModeOptions>.Instance.RespectTouMRoleListCaps
+    };
+
     public ModdedNumberOption MaxImpostors { get; set; } = new("Max Impostors", 2f, 1f, 5f, 1f, MiraNumberSuffixes.None, "0")
     {
         Visible = () => OptionGroupSingleton<DraftModeOptions>.Instance.EnableDraft
+            && !OptionGroupSingleton<DraftModeOptions>.Instance.RespectTouMRoleListCaps
     };
 
     public ModdedNumberOption MaxNeutralKillings { get; set; } = new("Max Neutral Killings", 2f, 1f, 10f, 1f, MiraNumberSuffixes.None, "0")
     {
         Visible = () => OptionGroupSingleton<DraftModeOptions>.Instance.EnableDraft
+            && !OptionGroupSingleton<DraftModeOptions>.Instance.RespectTouMRoleListCaps
     };
 
     public ModdedNumberOption MaxNeutralPassives { get; set; } = new("Max Neutral Other", 3f, 1f, 10f, 1f, MiraNumberSuffixes.None, "0")
     {
         Visible = () => OptionGroupSingleton<DraftModeOptions>.Instance.EnableDraft
+            && !OptionGroupSingleton<DraftModeOptions>.Instance.RespectTouMRoleListCaps
     };
 }

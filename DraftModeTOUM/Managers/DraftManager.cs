@@ -53,6 +53,10 @@ namespace DraftModeTOUM.Managers
         public static int MaxImpostors       { get; set; } = 2;
         public static int MaxNeutralKillings { get; set; } = 2;
         public static int MaxNeutralPassives { get; set; } = 3;
+        public static int MinImpostors       { get; set; } = 0;
+        public static int MinNeutralKillings { get; set; } = 0;
+        public static int MinNeutralPassives { get; set; } = 0;
+        public static bool RespectTouMRoleListCaps { get; set; } = false;
 
         private static int _impostorsDrafted       = 0;
         private static int _neutralKillingsDrafted = 0;
@@ -71,6 +75,7 @@ namespace DraftModeTOUM.Managers
         private static readonly HashSet<ushort> _roundOfferReserved = new();
         private static readonly HashSet<ushort> _roundChosenRoles   = new();
         private static readonly HashSet<byte>   _roundReadyPickers  = new();
+        private static readonly HashSet<int>    _roundMinimumRequiredSlots = new();
         private static bool _suppressAdvance = false;
         private static readonly Dictionary<int, HashSet<RoleFaction>> _roundAllowedFactions = new();
 
@@ -203,6 +208,7 @@ namespace DraftModeTOUM.Managers
             _roundOfferReserved.Clear();
             _roundChosenRoles.Clear();
             _roundReadyPickers.Clear();
+            _roundMinimumRequiredSlots.Clear();
             DraftStatusOverlay.SetState(OverlayState.Waiting);
         }
 
@@ -237,6 +243,19 @@ namespace DraftModeTOUM.Managers
             int totalSlots    = players.Count;
             var shuffledSlots = Enumerable.Range(1, totalSlots).OrderBy(_ => UnityEngine.Random.value).ToList();
 
+            if (RespectTouMRoleListCaps
+                && TouMRoleListCaps.TryResolve(totalSlots, out int roleListImp, out int roleListNk, out int roleListNp))
+            {
+                MaxImpostors = roleListImp;
+                MaxNeutralKillings = roleListNk;
+                MaxNeutralPassives = roleListNp;
+                MinImpostors = 0;
+                MinNeutralKillings = 0;
+                MinNeutralPassives = 0;
+            }
+
+            ApplyFactionBounds(totalSlots);
+
             List<byte> syncPids  = new();
             List<int>  syncSlots = new();
 
@@ -258,6 +277,7 @@ namespace DraftModeTOUM.Managers
             _roundOfferReserved.Clear();
             _roundChosenRoles.Clear();
             _roundReadyPickers.Clear();
+            _roundMinimumRequiredSlots.Clear();
             IsDraftActive = true;
 
             AssignFactionBuckets();
@@ -406,7 +426,8 @@ namespace DraftModeTOUM.Managers
 
             LoggingSystem.Debug(
                 $"[DraftManager] Buckets assigned: {impSlots} Imp, {nkSlots} NK, " +
-                $"{npSlots} NP, {playerCount - impSlots - nkSlots - npSlots} Crew");
+                $"{npSlots} NP, {playerCount - impSlots - nkSlots - npSlots} Crew " +
+                $"(mins Imp={MinImpostors}, NK={MinNeutralKillings}, NP={MinNeutralPassives})");
         }
 
         
@@ -440,6 +461,7 @@ namespace DraftModeTOUM.Managers
             _roundOfferReserved.Clear();
             _roundChosenRoles.Clear();
             _roundReadyPickers.Clear();
+            _roundMinimumRequiredSlots.Clear();
 
             _impostorsDrafted       = 0;
             _neutralKillingsDrafted = 0;
@@ -515,7 +537,7 @@ namespace DraftModeTOUM.Managers
 
         
 
-        private static List<ushort> GetAvailableIds(HashSet<ushort> exclude = null)
+        private static List<ushort> GetAvailableIds(HashSet<ushort> exclude = null, PlayerDraftState state = null)
         {
             return _pool.RoleIds.Where(id =>
             {
@@ -525,13 +547,14 @@ namespace DraftModeTOUM.Managers
                 if (faction == RoleFaction.Impostor       && _impostorsDrafted      >= MaxImpostors)       return false;
                 if (faction == RoleFaction.NeutralKilling && _neutralKillingsDrafted >= MaxNeutralKillings) return false;
                 if (faction == RoleFaction.Neutral        && _neutralPassivesDrafted >= MaxNeutralPassives) return false;
+                if (state != null && !DoesChoicePreserveMinimums(state, faction)) return false;
                 return true;
             }).ToList();
         }
 
-        private static List<ushort> GetAvailableForFaction(RoleFaction faction)
+        private static List<ushort> GetAvailableForFaction(RoleFaction faction, PlayerDraftState state = null)
         {
-            return GetAvailableIds().Where(id => GetFaction(id) == faction).ToList();
+            return GetAvailableIds(state: state).Where(id => GetFaction(id) == faction).ToList();
         }
 
         
@@ -548,6 +571,7 @@ namespace DraftModeTOUM.Managers
             _roundOfferReserved.Clear();
             _roundChosenRoles.Clear();
             _roundReadyPickers.Clear();
+            _roundMinimumRequiredSlots.Clear();
             _activeSlots = GetNextActiveSlots();
             
             if (_forcedRoleId.HasValue && _forcedRoleTargetId != 255)
@@ -644,10 +668,32 @@ namespace DraftModeTOUM.Managers
             int remainingNK  = Mathf.Max(0, MaxNeutralKillings - _neutralKillingsDrafted);
             int remainingNP  = Mathf.Max(0, MaxNeutralPassives - _neutralPassivesDrafted);
 
+            foreach (var slot in _activeSlots)
+                _roundAllowedFactions[slot] = new HashSet<RoleFaction>();
+
             if (remainingImp + remainingNK + remainingNP <= 0)
             {
-                foreach (var slot in _activeSlots)
-                    _roundAllowedFactions[slot] = new HashSet<RoleFaction>();
+                return;
+            }
+
+            var requiredFactions = BuildRequiredFactionAssignments(
+                remainingImp,
+                remainingNK,
+                remainingNP,
+                _activeSlots.Count);
+
+            if (requiredFactions.Count > 0)
+            {
+                var openSlots = new List<int>(_activeSlots);
+                foreach (var faction in requiredFactions)
+                {
+                    int slot = PickPreferredActiveSlot(openSlots, faction);
+                    if (slot < 0) break;
+                    _roundAllowedFactions[slot].Add(faction);
+                    _roundMinimumRequiredSlots.Add(slot);
+                    openSlots.Remove(slot);
+                }
+
                 return;
             }
 
@@ -670,9 +716,6 @@ namespace DraftModeTOUM.Managers
             else
                 allowedSlot = _activeSlots[UnityEngine.Random.Range(0, _activeSlots.Count)];
 
-            foreach (var slot in _activeSlots)
-                _roundAllowedFactions[slot] = new HashSet<RoleFaction>();
-
             if (_roundAllowedFactions.TryGetValue(allowedSlot, out var set))
             {
                 if (remainingImp > 0) set.Add(RoleFaction.Impostor);
@@ -689,6 +732,11 @@ namespace DraftModeTOUM.Managers
             if (!_roundAllowedFactions.TryGetValue(state.SlotNumber, out var allowed) || allowed.Count == 0)
             {
                 return ids.Where(id => GetFaction(id) == RoleFaction.Crewmate).ToList();
+            }
+
+            if (_roundMinimumRequiredSlots.Contains(state.SlotNumber))
+            {
+                return ids.Where(id => allowed.Contains(GetFaction(id))).ToList();
             }
 
             return ids.Where(id =>
@@ -714,7 +762,7 @@ namespace DraftModeTOUM.Managers
                 return new List<ushort>();
             }
 
-            var available = GetAvailableIds(effectiveReserved);
+            var available = GetAvailableIds(effectiveReserved, state);
             available = FilterAvailableForRound(state, available);
             var offered   = new List<ushort>();
 
@@ -743,7 +791,7 @@ namespace DraftModeTOUM.Managers
 
                 if (state.GuaranteedFaction.HasValue && nonCrew.Count > 0)
                 {
-                    var bucketPool = GetAvailableForFaction(state.GuaranteedFaction.Value)
+                    var bucketPool = available.Where(id => GetFaction(id) == state.GuaranteedFaction.Value)
                         .Where(id => !IsRoleReserved(id, reserved)).ToList();
                     if (bucketPool.Count > 0)
                     {
@@ -859,10 +907,21 @@ namespace DraftModeTOUM.Managers
                 if (!state.OfferedRoleIds.Contains(id)) exclude.Add(id);
             }
 
-            var pick = PickFullRandom(exclude);
+            var available = FilterAvailableForRound(state, GetAvailableIds(exclude, state));
+            if (available.Count == 0) return (ushort)RoleTypes.Crewmate;
+
+            var pick = UseRoleChances
+                ? PickWeighted(available)
+                : available[UnityEngine.Random.Range(0, available.Count)];
+
             if (IsUniqueRole(pick) && exclude.Contains(pick))
             {
-                pick = PickFullRandom(_roundChosenRoles);
+                var fallback = FilterAvailableForRound(state, GetAvailableIds(_roundChosenRoles, state));
+                if (fallback.Count == 0) return (ushort)RoleTypes.Crewmate;
+
+                pick = UseRoleChances
+                    ? PickWeighted(fallback)
+                    : fallback[UnityEngine.Random.Range(0, fallback.Count)];
             }
             return pick;
         }
@@ -1127,9 +1186,101 @@ namespace DraftModeTOUM.Managers
             OfferedRolesCount     = Mathf.Clamp(Mathf.RoundToInt(opts.OfferedRolesCount.Value), 1, 9);
             ConcurrentPickCount   = Mathf.Clamp(Mathf.RoundToInt(opts.ConcurrentPicks.Value), 1, 2);
             ShowRandomOption      = opts.ShowRandomOption;
+            MinImpostors          = Mathf.Clamp(Mathf.RoundToInt(opts.MinImpostors.Value), 0, 10);
+            MinNeutralKillings    = Mathf.Clamp(Mathf.RoundToInt(opts.MinNeutralKillings.Value), 0, 10);
+            MinNeutralPassives    = Mathf.Clamp(Mathf.RoundToInt(opts.MinNeutralPassives.Value), 0, 10);
             MaxImpostors          = Mathf.Clamp(Mathf.RoundToInt(opts.MaxImpostors.Value), 0, 10);
             MaxNeutralKillings    = Mathf.Clamp(Mathf.RoundToInt(opts.MaxNeutralKillings.Value), 0, 10);
             MaxNeutralPassives    = Mathf.Clamp(Mathf.RoundToInt(opts.MaxNeutralPassives.Value), 0, 10);
+            RespectTouMRoleListCaps = opts.RespectTouMRoleListCaps;
+
+            if (RespectTouMRoleListCaps)
+            {
+                MinImpostors = 0;
+                MinNeutralKillings = 0;
+                MinNeutralPassives = 0;
+            }
+        }
+
+        private static void ApplyFactionBounds(int playerCount)
+        {
+            int impPoolCap = GetFactionPoolCapacity(RoleFaction.Impostor);
+            int nkPoolCap  = GetFactionPoolCapacity(RoleFaction.NeutralKilling);
+            int npPoolCap  = GetFactionPoolCapacity(RoleFaction.Neutral);
+
+            MaxImpostors       = Mathf.Clamp(MaxImpostors, 0, Mathf.Min(playerCount, impPoolCap));
+            MaxNeutralKillings = Mathf.Clamp(MaxNeutralKillings, 0, Mathf.Min(playerCount, nkPoolCap));
+            MaxNeutralPassives = Mathf.Clamp(MaxNeutralPassives, 0, Mathf.Min(playerCount, npPoolCap));
+
+            MinImpostors       = Mathf.Clamp(MinImpostors, 0, MaxImpostors);
+            MinNeutralKillings = Mathf.Clamp(MinNeutralKillings, 0, MaxNeutralKillings);
+            MinNeutralPassives = Mathf.Clamp(MinNeutralPassives, 0, MaxNeutralPassives);
+        }
+
+        private static int GetFactionPoolCapacity(RoleFaction faction)
+        {
+            return _pool.RoleIds
+                .Where(id => GetFaction(id) == faction)
+                .Sum(GetMaxCount);
+        }
+
+        private static int GetRemainingPickCount(PlayerDraftState excludingState = null)
+        {
+            return _slotMap.Values.Count(state =>
+                state != null
+                && !state.HasPicked
+                && (excludingState == null || state != excludingState));
+        }
+
+        private static bool DoesChoicePreserveMinimums(PlayerDraftState state, RoleFaction choiceFaction)
+        {
+            if (state == null) return true;
+
+            int draftedImp = _impostorsDrafted + (choiceFaction == RoleFaction.Impostor ? 1 : 0);
+            int draftedNK  = _neutralKillingsDrafted + (choiceFaction == RoleFaction.NeutralKilling ? 1 : 0);
+            int draftedNP  = _neutralPassivesDrafted + (choiceFaction == RoleFaction.Neutral ? 1 : 0);
+
+            int missingImp = Mathf.Max(0, MinImpostors - draftedImp);
+            int missingNK  = Mathf.Max(0, MinNeutralKillings - draftedNK);
+            int missingNP  = Mathf.Max(0, MinNeutralPassives - draftedNP);
+            int remainingSlots = GetRemainingPickCount(state);
+
+            return missingImp + missingNK + missingNP <= remainingSlots;
+        }
+
+        private static List<RoleFaction> BuildRequiredFactionAssignments(int remainingImp, int remainingNK, int remainingNP, int slotsAvailable)
+        {
+            var required = new List<RoleFaction>();
+            AddRequiredFactions(required, RoleFaction.Impostor, Mathf.Min(remainingImp, Mathf.Max(0, MinImpostors - _impostorsDrafted)));
+            AddRequiredFactions(required, RoleFaction.NeutralKilling, Mathf.Min(remainingNK, Mathf.Max(0, MinNeutralKillings - _neutralKillingsDrafted)));
+            AddRequiredFactions(required, RoleFaction.Neutral, Mathf.Min(remainingNP, Mathf.Max(0, MinNeutralPassives - _neutralPassivesDrafted)));
+
+            if (required.Count <= slotsAvailable) return required;
+
+            return required
+                .OrderByDescending(faction => required.Count(f => f == faction))
+                .ThenBy(_ => UnityEngine.Random.value)
+                .Take(slotsAvailable)
+                .ToList();
+        }
+
+        private static void AddRequiredFactions(List<RoleFaction> required, RoleFaction faction, int count)
+        {
+            for (int i = 0; i < count; i++) required.Add(faction);
+        }
+
+        private static int PickPreferredActiveSlot(List<int> candidateSlots, RoleFaction faction)
+        {
+            if (candidateSlots == null || candidateSlots.Count == 0) return -1;
+
+            var preferred = candidateSlots
+                .Where(slot => GetStateForSlot(slot)?.GuaranteedFaction == faction)
+                .ToList();
+
+            if (preferred.Count > 0)
+                return preferred[UnityEngine.Random.Range(0, preferred.Count)];
+
+            return candidateSlots[UnityEngine.Random.Range(0, candidateSlots.Count)];
         }
 
         private static int GetDraftedCount(ushort id) => _draftedCounts.TryGetValue(id, out var c) ? c : 0;
@@ -1219,7 +1370,3 @@ namespace DraftModeTOUM.Managers
         }
     }
 }
-
-
-
-

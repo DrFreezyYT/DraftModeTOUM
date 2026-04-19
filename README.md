@@ -74,6 +74,9 @@ Key settings:
 - Turn Duration
 - Auto-start After Draft
 - Show Draft Recap
+- Min Impostors / Min Neutral Killings / Min Neutral Other
+- Max Impostors / Max Neutral Killings / Max Neutral Other
+- Respect ToU:M Role List Caps
 ---
 
 ## Draft Recap
@@ -107,12 +110,10 @@ The roles available to be drafted are controlled by the host's **TOUM Role Setti
 - HnS Roles
 - Traitor
 
-Faction caps (Max Impostors, Max Neutral Killings, Max Neutral Other) are applied globally across the entire draft — once a cap is hit, no more roles of that faction will be offered to any player.
+Faction caps (Min/Max Impostors, Min/Max Neutral Killings, Min/Max Neutral Other) are applied globally across the entire draft. Maximums stop Draft Mode from offering more of that faction once the cap is hit, while minimums tighten later offers and random picks so the draft can still reach the requested faction counts. If `Respect ToU:M Role List Caps` is enabled, Draft Mode ignores those manual faction bounds and derives its caps from TOU:M's current role list instead.
 
 ---
 
 ## License
 
 MIT
-
-
